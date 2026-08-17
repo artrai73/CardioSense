@@ -1,0 +1,160 @@
+# ---------------------------------------------------------------------------
+# configs/xray_config.yaml
+#
+# Pipeline 3 of 3: chest X-ray cardiomegaly detection.
+# ---------------------------------------------------------------------------
+
+modality: xray
+seed: 42
+strict_determinism: false
+
+dataset:
+  # --- CHOSEN: NIH ChestX-ray14 (see docs/datasets.md for the CheXpert
+  # comparison). Reasons in one line: open download with no credentialing
+  # delay, one flat metadata CSV, explicit Patient ID column for patient-level
+  # splitting, and binary labels with no uncertainty codes to invent policy for.
+  name: nih_chestxray14
+  root: data/xray/nih
+  metadata_csv: Data_Entry_2017_v2020.csv   # official label file
+  images_dir: images                        # flat folder of all PNGs
+  official_test_list: test_list.txt         # patient-disjoint official split
+  official_trainval_list: train_val_list.txt
+
+  image_column: "Image Index"
+  patient_column: "Patient ID"
+  label_column: "Finding Labels"            # pipe-separated multi-label string
+  view_column: "View Position"
+
+  # --- Target -----------------------------------------------------------
+  # Binary Cardiomegaly, extracted from the existing pipe-separated labels.
+  # No label is invented: a record is positive iff "Cardiomegaly" appears in
+  # Finding Labels. Prevalence is roughly 2.5% of the 112,120 images, which is
+  # why class imbalance handling is mandatory below.
+  target_label: Cardiomegaly
+
+  # Restrict to PA (posteroanterior) frontal views. AP films are taken with
+  # portable machines on sicker, supine patients and magnify the cardiac
+  # silhouette, which changes the meaning of the cardiothoracic ratio. Mixing
+  # them adds a confound the model can exploit as a shortcut.
+  filter_view: PA
+
+  # Optional subsampling of the NEGATIVE class only, to keep a Colab epoch
+  # under ~10 min. Set `negative_ratio: null` to use every negative.
+  negative_ratio: 8          # keep 8 negatives per positive
+  max_images: null           # hard cap for smoke tests, e.g. 4000
+
+split:
+  # PATIENT-LEVEL, not image-level. A single patient can contribute dozens of
+  # films; splitting by image puts the same chest in train and test and inflates
+  # AUC by several points. `strategy: official` reuses NIH's own patient-disjoint
+  # train/test lists and carves validation out of train BY PATIENT.
+  strategy: official         # official | grouped_random
+  val_size: 0.15             # fraction of train-val PATIENTS
+  test_size: 0.15            # only used when strategy == grouped_random
+  stratify_by_target: true
+
+preprocessing:
+  image_size: 224            # DenseNet121's native ImageNet resolution
+  to_rgb: true               # 1-channel PNG -> 3 channels for pretrained weights
+  # ImageNet statistics, because we start from ImageNet weights. Using dataset
+  # statistics instead breaks the assumption the pretrained filters were fit under.
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+augmentation:
+  # TRAIN ONLY. Val/test get resize + normalize and nothing else.
+  # Medically constrained: no horizontal flip (it mirrors the heart to the right
+  # side of the chest and would teach the model that dextrocardia is normal),
+  # no vertical flip, only small rotations/translations consistent with real
+  # patient positioning variation.
+  enabled: true
+  random_resized_crop_scale: [0.9, 1.0]
+  rotation_degrees: 7
+  translate: [0.05, 0.05]
+  brightness: 0.10
+  contrast: 0.10
+  horizontal_flip: false
+  vertical_flip: false
+
+baseline:
+  # Two references, both cheap:
+  #  1) majority-class predictor -> shows why accuracy is a useless metric here
+  #  2) logistic regression on downsampled-pixel + histogram features
+  models: [majority_class, logreg_pixel_features]
+  downsample_size: 32
+  hist_bins: 32
+  max_iter: 1000
+  class_weight: balanced
+
+model:
+  name: densenet121
+  pretrained: true           # torchvision DenseNet121_Weights.IMAGENET1K_V1
+  n_classes: 1               # single logit + BCEWithLogits for binary
+  dropout: 0.2
+  # Two-stage fine-tuning:
+  #   stage 1 - freeze all features, train the new classifier head only
+  #   stage 2 - unfreeze from `unfreeze_from_block` onward at a lower LR
+  freeze_backbone_epochs: 2
+  unfreeze_from_block: denseblock3
+
+training:
+  epochs: 15
+  batch_size: 32             # 224px DenseNet121 + AMP fits comfortably on a T4
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  optimizer: adamw
+  learning_rate: 0.0003      # head stage
+  finetune_learning_rate: 0.00005   # after unfreezing
+  weight_decay: 0.00001
+  loss: bce_with_logits
+  scheduler:
+    name: cosine
+    warmup_epochs: 1
+    min_lr: 0.000001
+  early_stopping:
+    monitor: val_pr_auc      # PR-AUC, not accuracy — see evaluation note
+    mode: max
+    patience: 4
+    min_delta: 0.001
+  amp: true
+  grad_clip_norm: 5.0
+  resume: true
+  checkpoint_every_epoch: true
+
+class_imbalance:
+  # ONE method, chosen deliberately: positive-class weighting inside
+  # BCEWithLogitsLoss (pos_weight = n_neg / n_pos on the training split).
+  # Rationale: it is a single scalar, it does not change the number of images
+  # seen per epoch, and it composes cleanly with AMP. WeightedRandomSampler is
+  # implemented but disabled — stacking both double-counts the correction and
+  # produces wildly over-confident probabilities, which would poison the
+  # confidence-aware fusion planned for Phase 2.
+  method: pos_weight         # pos_weight | weighted_sampler | none
+  pos_weight: auto
+
+evaluation:
+  # With ~2.5% prevalence, a model that predicts "no cardiomegaly" for every
+  # image scores ~97.5% accuracy while being clinically worthless. PR-AUC is the
+  # headline metric; ROC-AUC is reported for comparability with the literature;
+  # the operating threshold is chosen on VALIDATION.
+  primary_metric: pr_auc
+  threshold_strategy: max_f1     # max_f1 | youden | fixed
+  fixed_threshold: 0.5
+  bootstrap_ci: true
+  n_bootstrap: 1000
+
+explainability:
+  method: gradcam
+  target_layer: features.denseblock4   # last dense block before global pooling
+  n_examples: 12                       # TP / TN / FP / FN, 3 each
+  overlay_alpha: 0.4
+  colormap: jet
+
+output:
+  models_dir: models/xray
+  results_dir: results/xray
+  model_file: xray_model.pth
+  config_file: xray_config.json
+  metadata_file: xray_metadata.json
+  model_version: xray-v0.1.0

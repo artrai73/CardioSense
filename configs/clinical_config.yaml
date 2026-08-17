@@ -1,0 +1,131 @@
+# ---------------------------------------------------------------------------
+# configs/clinical_config.yaml
+#
+# Pipeline 1 of 3: tabular clinical risk prediction.
+# Loaded via: load_config("configs/clinical_config.yaml")
+# (paths.yaml is merged in automatically as the base layer.)
+# ---------------------------------------------------------------------------
+
+modality: clinical
+seed: 42
+strict_determinism: true      # zero cost for sklearn/XGBoost on CPU
+
+dataset:
+  # ---------------------------------------------------------------------
+  # UCI Heart Disease.
+  #
+  # `source: uci_api`  -> downloaded automatically with ucimlrepo (id=45).
+  #                       This returns the CLEVELAND subset: 303 rows, 13
+  #                       predictors, target `num` in {0,1,2,3,4}.
+  # `source: local_csv` -> reads `local_csv_path` instead. Use this if you
+  #                       have no internet in the runtime, or if you switch to
+  #                       the pooled 4-hospital version (see docs/datasets.md).
+  # ---------------------------------------------------------------------
+  name: uci_heart_disease
+  source: uci_api           # uci_api | local_csv
+  uci_repo_id: 45
+  local_csv_path: data/clinical/heart_disease.csv
+  raw_cache_path: data/clinical/uci_heart_disease_raw.csv
+
+  # Target definition ----------------------------------------------------
+  # The raw label `num` encodes angiographic disease severity 0-4.
+  # Phase 1 target = BINARY presence of disease: num == 0 -> 0, num > 0 -> 1.
+  # This is the standard formulation in the literature and keeps the positive
+  # class large enough (~46% of Cleveland) to train and calibrate reliably.
+  # The severity-graded version is left to Phase 2.
+  target_column: num
+  target_name: heart_disease
+  binarize_target: true
+  positive_class_meaning: ">50% diameter narrowing in >=1 major vessel"
+
+  # Column typing. `ca` and `thal` arrive as floats but are categorical codes,
+  # and they are the only columns with missing values in Cleveland
+  # (6 and 2 rows respectively).
+  numeric_features: [age, trestbps, chol, thalach, oldpeak]
+  categorical_features: [sex, cp, fbs, restecg, exang, slope, ca, thal]
+  drop_features: []
+
+split:
+  # Stratified 70 / 15 / 15. Test is held out and touched exactly once.
+  # Validation exists so that threshold selection and calibration fitting never
+  # see the test set.
+  test_size: 0.15
+  val_size: 0.15            # fraction of the FULL dataset, not of the remainder
+  stratify: true
+  shuffle: true
+
+preprocessing:
+  numeric_imputer: median
+  categorical_imputer: most_frequent
+  scaler: standard          # standard | minmax | none
+  # Tree models do not need scaling, but the ColumnTransformer is shared so that
+  # the SAME fitted object serves both models and inference. Scaling is
+  # monotonic and harmless to XGBoost.
+  one_hot: true
+  one_hot_min_frequency: null
+  handle_unknown: infrequent_if_exist
+
+models:
+  logistic_regression:
+    enabled: true
+    max_iter: 2000
+    class_weight: balanced
+    penalty: l2
+    solver: lbfgs
+    C_grid: [0.01, 0.1, 0.5, 1.0, 5.0, 10.0]
+
+  xgboost:
+    enabled: true
+    # Small, deliberately constrained search: 303 rows punishes deep trees.
+    # RandomizedSearchCV over this space with 5-fold stratified CV is ~40s on
+    # Colab CPU — no GPU needed, and no 10,000-fit grid search.
+    n_iter_search: 40
+    cv_folds: 5
+    scoring: roc_auc
+    fixed_params:
+      objective: binary:logistic
+      eval_metric: logloss
+      tree_method: hist
+      n_jobs: -1
+    search_space:
+      n_estimators: [100, 200, 300, 400]
+      max_depth: [2, 3, 4]
+      learning_rate: [0.01, 0.03, 0.05, 0.1]
+      subsample: [0.6, 0.8, 1.0]
+      colsample_bytree: [0.6, 0.8, 1.0]
+      min_child_weight: [1, 3, 5]
+      reg_lambda: [0.5, 1.0, 5.0]
+      gamma: [0.0, 0.1, 0.5]
+
+selection:
+  # Model choice is NOT made on accuracy. Ranking metric is ROC-AUC (threshold
+  # independent, appropriate for a near-balanced binary target); ties within
+  # `tie_tolerance` are broken in favour of the simpler / better-calibrated
+  # model. Recall is reported prominently because a false negative (missed
+  # disease) is the costly error here.
+  primary_metric: roc_auc
+  tie_tolerance: 0.01
+  report_metrics: [accuracy, precision, recall, f1, roc_auc, pr_auc, brier]
+
+calibration:
+  # Both are fitted on the VALIDATION split and compared on TEST.
+  # Expectation for n_val ~ 45: Platt (sigmoid) usually wins because isotonic
+  # regression overfits on small validation sets. The code decides empirically.
+  methods: [sigmoid, isotonic]
+  selection_metric: brier   # brier | ece | log_loss
+  n_bins: 10
+
+explainability:
+  shap:
+    # TreeExplainer for XGBoost (exact, fast); LinearExplainer for LogReg.
+    max_display: 15
+    n_local_examples: 6     # 2 TP, 2 FP, 2 FN chosen by the error analysis step
+
+output:
+  models_dir: models/clinical
+  results_dir: results/clinical
+  model_file: clinical_model.pkl
+  preprocessor_file: clinical_preprocessor.pkl
+  calibrator_file: clinical_calibrator.pkl
+  metadata_file: clinical_metadata.json
+  model_version: clinical-v0.1.0

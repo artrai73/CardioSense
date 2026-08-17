@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# configs/paths.yaml — shared, modality-independent settings.
+#
+# Every path below is RELATIVE to the project root. The project root is located
+# automatically at runtime (see src/cardiosense/common/paths.py), so nothing
+# here needs editing when you move between your laptop and Colab.
+#
+# Only exception: `data_root`. Raw datasets are far too big for a Git repo and
+# for the Colab local disk on a long session, so you will normally keep them on
+# Google Drive. Override the location WITHOUT editing this file by exporting:
+#
+#     export CARDIOSENSE_DATA_ROOT=/content/drive/MyDrive/CardioSense/data
+#
+# The env var always wins over the value below.
+# ---------------------------------------------------------------------------
+
+project_name: CardioSense
+phase: 1
+
+paths:
+  data_root: data          # overridden by $CARDIOSENSE_DATA_ROOT
+  models_root: models
+  results_root: results
+  docs_root: docs
+  experiments_dir: results/experiments
+
+# Global reproducibility defaults. Individual configs may override `seed`.
+seed: 42
+
+# strict_determinism: if true, PyTorch is forced into deterministic algorithms
+# and cuDNN autotuning is disabled.
+#
+# TRADE-OFF (documented for the report): deterministic cuDNN kernels are chosen
+# once and never benchmarked, and some fast kernels have no deterministic
+# implementation at all. On Colab T4/L4 this typically costs 10-30% training
+# throughput for the CNNs, and PyTorch will RAISE an error if an op has no
+# deterministic variant. Recommended setting: false for the ECG/X-ray CNNs
+# (seeding alone gives run-to-run variation of well under 1 AUC point, which we
+# report), true for the clinical pipeline where the cost is zero.
+strict_determinism: false
+
+logging:
+  level: INFO
+  to_file: true
+  filename: cardiosense.log

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cardiosense"
+version = "0.1.0"
+description = "CardioSense Phase 1 — clinical, ECG and chest X-ray AI pipelines"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "CardioSense Project" }]
+keywords = ["cardiovascular", "ecg", "chest-xray", "explainable-ai", "calibration"]
+
+# Runtime deps are managed via requirements.txt / requirements-colab.txt so that
+# Colab can skip torch. `pip install -e .` therefore installs only the package.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["cardiosense*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
