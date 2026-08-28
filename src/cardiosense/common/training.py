@@ -229,10 +229,25 @@ class CheckpointManager:
         history: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Path]:
-        """Persist state. Returns the paths written."""
+        """Persist state. Returns the paths written.
+
+        The improvement check happens **before** anything is written, so both
+        files record the up-to-date best value. Writing ``last.pt`` first and
+        updating afterwards would leave it holding the *previous* epoch's best —
+        which then gets restored on resume, so early stopping and ``_is_better``
+        would both restart from a stale, worse baseline and could overwrite
+        ``best.pt`` with an inferior checkpoint.
+        """
         import torch
 
         metrics = dict(metrics or {})
+
+        current = metrics.get(self.monitor)
+        improved = current is not None and self._is_better(float(current))
+        if improved:
+            self.best_value = float(current)
+            self.best_epoch = int(epoch)
+
         payload: dict[str, Any] = {
             "epoch": int(epoch),
             "model_state": model.state_dict(),
@@ -252,12 +267,7 @@ class CheckpointManager:
         written = {"last": self.last_path}
         torch.save(payload, self.last_path)
 
-        current = metrics.get(self.monitor)
-        if current is not None and self._is_better(float(current)):
-            self.best_value = float(current)
-            self.best_epoch = int(epoch)
-            payload["best_value"] = self.best_value
-            payload["best_epoch"] = self.best_epoch
+        if improved:
             torch.save(payload, self.best_path)
             written["best"] = self.best_path
             logger.info("New best %s = %.5f at epoch %d -> %s",

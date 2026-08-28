@@ -24,6 +24,7 @@ __all__ = [
     "make_prefit_calibrator",
     "make_grad_scaler",
     "autocast_context",
+    "logistic_penalty_kwargs",
     "sklearn_version",
     "torch_version",
 ]
@@ -79,6 +80,44 @@ def make_prefit_calibrator(estimator: Any, method: str = "sigmoid") -> Any:
 
         return CalibratedClassifierCV(FrozenEstimator(estimator), method=method)
     return CalibratedClassifierCV(estimator, method=method, cv="prefit")
+
+
+def logistic_penalty_kwargs(penalty: str | None = "l2") -> dict[str, Any]:
+    """Translate a penalty name into kwargs valid for the installed scikit-learn.
+
+    scikit-learn 1.8 deprecated ``LogisticRegression(penalty=...)`` (removal in
+    1.10) in favour of expressing the same thing through ``l1_ratio`` and ``C``:
+
+    =============  ===================================
+    penalty        sklearn >= 1.8 equivalent
+    =============  ===================================
+    ``"l2"``       ``l1_ratio=0`` (the default)
+    ``"l1"``       ``l1_ratio=1``
+    ``"elasticnet"`` caller supplies ``l1_ratio``
+    ``None``       ``C=inf`` (no regularisation)
+    =============  ===================================
+
+    Args:
+        penalty: ``"l2"``, ``"l1"``, ``"elasticnet"`` or ``None``.
+
+    Returns:
+        Keyword arguments to splat into the ``LogisticRegression`` constructor.
+    """
+    if sklearn_version() < (1, 8):
+        return {} if penalty is None else {"penalty": penalty}
+
+    import numpy as np
+
+    name = (penalty or "none").lower()
+    if name in {"l2", "none_l2"}:
+        return {}                      # l2 is the default; passing it now warns
+    if name == "l1":
+        return {"l1_ratio": 1.0}
+    if name == "elasticnet":
+        return {}                      # caller must supply l1_ratio explicitly
+    if name in {"none", "null"}:
+        return {"C": float(np.inf)}
+    raise ValueError(f"Unknown penalty {penalty!r}")
 
 
 def make_grad_scaler(enabled: bool = True, device_type: str = "cuda") -> Any:

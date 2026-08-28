@@ -103,17 +103,52 @@ selection:
   # `tie_tolerance` are broken in favour of the simpler / better-calibrated
   # model. Recall is reported prominently because a false negative (missed
   # disease) is the costly error here.
+  #
+  # CRITICAL: selection happens on the VALIDATION split. The test split is
+  # touched exactly once, at the very end, for the final report.
   primary_metric: roc_auc
   tie_tolerance: 0.01
   report_metrics: [accuracy, precision, recall, f1, roc_auc, pr_auc, brier]
 
+  # Operating threshold, tuned on VALIDATION only.
+  #   youden  -> maximises sensitivity + specificity - 1. Standard in diagnostic
+  #              medicine, and it does not chase precision on a small sample.
+  #   f1      -> maximises F1.
+  #   fixed   -> use `fixed_threshold` unchanged.
+  # Metrics at the default 0.5 threshold are ALSO reported, so the effect of
+  # tuning is visible rather than hidden.
+  threshold_strategy: youden
+  fixed_threshold: 0.5
+
+  # WHICH data the threshold is fitted on.
+  #   cv_oof_plus_val -> out-of-fold training predictions pooled with validation
+  #                      (~250 patients). Strongly preferred: a threshold picked
+  #                      from 45 validation points is itself a noisy estimate. In
+  #                      testing, validation-only Youden produced a 0.65 cut that
+  #                      collapsed test recall, because it had fitted the
+  #                      validation noise rather than the operating point.
+  #   validation      -> validation only. Kept for the ablation.
+  # Neither option ever touches the test split.
+  threshold_tuning_data: cv_oof_plus_val
+
 calibration:
-  # Both are fitted on the VALIDATION split and compared on TEST.
-  # Expectation for n_val ~ 45: Platt (sigmoid) usually wins because isotonic
-  # regression overfits on small validation sets. The code decides empirically.
+  # WHICH method to use is decided by cross-validation on the TRAINING split
+  # (for each CV fold: fit the base model on k-1 folds, fit the calibrator on
+  # the held-out fold, score it). Choosing the method by scoring on validation
+  # would be circular, because the final calibrator is FITTED on validation;
+  # choosing it on test would be leakage. See calibrate.py for the full argument.
+  #
+  # Expectation for n_val ~ 45: Platt (sigmoid) usually wins, because isotonic
+  # regression is non-parametric and overfits small calibration sets. The code
+  # decides empirically rather than assuming this.
   methods: [sigmoid, isotonic]
   selection_metric: brier   # brier | ece | log_loss
+  selection_cv_folds: 5
   n_bins: 10
+  # Reliability diagrams on ~45 points are noisy with equal-width bins, so the
+  # curve is drawn with quantile bins as well, and the histogram of predicted
+  # probabilities is always shown underneath so bin occupancy is visible.
+  curve_strategy: uniform   # uniform | quantile
 
 explainability:
   shap:

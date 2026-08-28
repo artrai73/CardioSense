@@ -164,3 +164,49 @@ def test_expected_directories_exist():
     for modality in ("clinical", "ecg", "xray"):
         assert PATHS.results_for(modality).is_dir()
         assert PATHS.models_for(modality).is_dir()
+
+
+# --------------------------------------------------------------- checkpointing
+def test_last_checkpoint_records_the_current_best(tmp_path):
+    """`last.pt` must hold the up-to-date best, not the previous epoch's.
+
+    Regression test. Writing last.pt before updating the best value left it one
+    epoch stale, so resuming restored a worse baseline — after which early
+    stopping restarted from the wrong value and an inferior checkpoint could
+    overwrite best.pt.
+    """
+    torch = pytest.importorskip("torch")
+    from cardiosense.common.training import CheckpointManager
+
+    model = torch.nn.Linear(4, 1)
+    manager = CheckpointManager(tmp_path, monitor="val_auc", mode="max")
+
+    manager.save(0, model, metrics={"val_auc": 0.50})
+    manager.save(1, model, metrics={"val_auc": 0.80})   # improvement
+
+    payload = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert payload["best_value"] == pytest.approx(0.80)
+    assert payload["best_epoch"] == 1
+
+
+def test_resume_restores_the_correct_best_value(tmp_path):
+    torch = pytest.importorskip("torch")
+    from cardiosense.common.training import CheckpointManager
+
+    model = torch.nn.Linear(4, 1)
+    first = CheckpointManager(tmp_path, monitor="val_auc", mode="max")
+    first.save(0, model, metrics={"val_auc": 0.50})
+    first.save(1, model, metrics={"val_auc": 0.80})
+    first.save(2, model, metrics={"val_auc": 0.60})     # no improvement
+
+    resumed = CheckpointManager(tmp_path, monitor="val_auc", mode="max")
+    start_epoch, _history = resumed.maybe_resume(torch.nn.Linear(4, 1))
+
+    assert start_epoch == 3
+    assert resumed.best_value == pytest.approx(0.80)
+    assert resumed.best_epoch == 1
+
+    # A worse epoch after resuming must NOT overwrite best.pt.
+    resumed.save(3, model, metrics={"val_auc": 0.70})
+    best = torch.load(tmp_path / "best.pt", map_location="cpu", weights_only=False)
+    assert best["epoch"] == 1

@@ -27,11 +27,14 @@ Per-class AUC (NORM / MI / STTC / CD / HYP) is in `results/ecg/metrics.json`.
 
 ## 3. Chest X-ray — Cardiomegaly
 
-| Model | ROC-AUC | PR-AUC | Precision | Recall | F1 | Threshold |
-|---|---|---|---|---|---|---|
-| Majority class | | | | | | |
-| LogReg on pixel features | | | | | | |
-| DenseNet121 | | | | | | |
+| Model | PR-AUC | ROC-AUC | Precision | Recall | F1 | Accuracy | Threshold |
+|---|---|---|---|---|---|---|---|
+| Majority class | | | | | | | |
+| LogReg on pixel features | | | | | | | |
+| DenseNet121 | | | | | | | |
+
+PR-AUC chance level (= test prevalence): _____ . Report every PR-AUC against it.
+Accuracy is only meaningful read against the majority-class row.
 
 ## 4. Cross-modality comparison
 

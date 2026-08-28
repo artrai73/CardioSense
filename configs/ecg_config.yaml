@@ -143,7 +143,11 @@ evaluation:
 
 explainability:
   method: integrated_gradients
-  n_steps: 64
+  # Riemann-sum steps. Integrated Gradients satisfies "completeness" — the
+  # attributions must sum to F(x) - F(baseline) — and too few steps breaks that
+  # silently. The code checks it and automatically doubles n_steps (up to 1024)
+  # when the check fails, rather than returning a map known not to sum correctly.
+  n_steps: 128
   baseline: zeros             # all-zero signal = "no deflection" reference
   n_examples: 8
   leads_to_plot: [I, II, V1, V2, V5]

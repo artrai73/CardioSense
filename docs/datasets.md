@@ -314,3 +314,108 @@ limitations to carry into the report:
 - None of these cohorts is Indian. Prevalence, body habitus and referral patterns
   differ, so measured performance does not transfer to a local population without
   external validation.
+
+---
+
+## Deviation: training on a storage-constrained X-ray subset
+
+**Recorded here because a metric reported from a model trained on a subset is not
+comparable with one trained on the full dataset, and the difference must be
+visible rather than buried.**
+
+### What was done
+
+NIH ChestX-ray14 is ~45 GB across 112,120 images. Where storage or bandwidth make
+that impractical — a free Google Drive account holds 15 GB — the model is trained
+on a subset built by `scripts/build_xray_subset.py`:
+
+* **PA views only**, matching `configs/xray_config.yaml`.
+* **Every cardiomegaly-positive image is kept.** The positive class is scarce
+  (~2.5% of PA views) and discarding any of it would be indefensible.
+* **Negatives subsampled by patient** at 8 patients per positive image, matching
+  the pipeline's own `negative_ratio`.
+
+Result: roughly 25,000 images, about 9 GB.
+
+The sampling is **by patient, not by image**. A patient may contribute several
+radiographs, and the pipeline's train/test split is patient-level; sampling
+individual images here would interact badly with that split. Sampling whole
+patients keeps the structure intact.
+
+The script **mirrors `cardiosense.xray.data.build_target` exactly** — same
+`rng.choice` sampling, same rule that negatives are drawn only from patients with
+no positive film. This is not cosmetic: if the script chose a different patient set
+from the one the pipeline later selects, training would look for images that were
+never copied and fail with `FileNotFoundError`.
+
+It also writes a **filtered** metadata CSV and filtered split lists, describing only
+the images actually present. A wholesale copy of the 112,120-row CSV would lead the
+pipeline to select absent images for the same reason.
+
+Two commands follow from this, and the script prints both:
+
+```bash
+# Subsampling has already happened; doing it twice shrinks the cohort by
+# another factor of eight.
+python -m cardiosense.xray.train --set dataset.negative_ratio=null
+
+# Phase 2: the filtered CSV no longer shows the population prevalence, so the
+# prior correction must be given it explicitly.
+python -m cardiosense.xray.calibrate --target-prevalence 0.02538
+```
+
+The exact value is in `subset_manifest.json` under
+`population_prevalence_for_prior_correction`.
+
+The manifest also records the seed, the counts and the resulting prevalence, so the
+exact cohort is reproducible and describable.
+
+### What it changes
+
+The pipeline already subsamples negatives during training. Applying it at download
+time means the **evaluation split is also drawn from the subset**. Three
+consequences:
+
+1. **Prevalence is inflated by construction** — roughly 11% in the subset against
+   ~2.5% in the full PA cohort.
+2. **PR-AUC is not comparable with published ChestX-ray14 results.** PR-AUC's
+   chance level *is* the prevalence, so a higher prevalence raises the floor. A
+   PR-AUC of 0.35 on the subset is a weaker result than 0.35 on the full test set,
+   not a comparable one. `evaluate_binary` records `pr_auc_chance_level` for
+   exactly this reason — quote it alongside every PR-AUC.
+3. **The negative population is narrower.** Sampling 8 negative patients per
+   positive covers a smaller slice of the "everything that is not cardiomegaly"
+   distribution, so the model has seen fewer varieties of normal and fewer
+   confounding pathologies than a full-dataset model would.
+
+### How to report it
+
+State it in the methods section, not only the limitations:
+
+> The chest X-ray model was trained on a patient-disjoint subset of NIH
+> ChestX-ray14 (n ≈ 25,000; all cardiomegaly-positive PA views plus negatives
+> subsampled at 8 patients per positive, seed 42) owing to storage constraints.
+> Prevalence in this cohort is approximately 11% against 2.5% in the full PA
+> cohort, so PR-AUC is reported alongside its chance level and is not directly
+> comparable with published ChestX-ray14 benchmarks.
+
+If storage later allows the full dataset, rerun training without the subset and
+report both. The comparison would itself be a useful result.
+
+### Not a deviation: the ImageNet-pretrained backbone
+
+`configs/xray_config.yaml` sets `model.pretrained: true`, loading torchvision's
+`DenseNet121_Weights.IMAGENET1K_V1` and fine-tuning in two stages (classifier head
+first, then from `denseblock3` onward at a lower learning rate).
+
+This is standard practice for medical imaging with limited labelled data, not a
+shortcut: 112,120 chest radiographs are far too few to learn general visual
+features from scratch, and every comparable published model does the same. The
+weights that make the clinical prediction are trained by this project; only the
+low-level visual features are inherited.
+
+This is distinct from using a **third-party chest X-ray model** such as CheXNet or
+TorchXRayVision, which was considered and not adopted. Such a model would arrive
+with a threshold and a calibration fitted to someone else's cohort, so the modality
+could not contribute a meaningful confidence to the fusion — which is the point of
+the project.

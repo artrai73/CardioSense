@@ -21,6 +21,30 @@ calibrated where applicable, and explained independently.
 
 ---
 
+## 1a. Phase 1 status: COMPLETE
+
+All three pipelines are implemented, tested and runnable end to end.
+
+| Pipeline | Dataset | Task | Headline metric | Explainability | Notebook |
+|---|---|---|---|---|---|
+| Clinical | UCI Heart Disease | Binary risk | ROC-AUC + Brier | SHAP | `01_clinical_training.ipynb` |
+| ECG | PTB-XL | 5-class, **multi-label** | Macro ROC-AUC | Integrated Gradients | `02_ecg_training.ipynb` |
+| X-ray | NIH ChestX-ray14 | Binary cardiomegaly | **PR-AUC** | Grad-CAM | `03_xray_training.ipynb` |
+
+111 tests pass on CPU with no datasets present:
+
+```bash
+python -m pytest tests/ -q
+```
+
+Each pipeline also runs headless:
+
+```bash
+python -m cardiosense.clinical.train
+python -m cardiosense.ecg.train
+python -m cardiosense.xray.train
+```
+
 ## 2. Phase 1 scope
 
 > **Multimodal fusion, confidence-aware fusion, RAG, LLM-based recommendations,
@@ -245,26 +269,86 @@ data/
 
 ## 8. Training commands
 
-_(Populated as each pipeline is built. The interface is fixed now so the
-notebooks and scripts stay in step.)_
+### Clinical (implemented)
 
 ```bash
-# Clinical  — CPU, ~2 minutes
-python -m cardiosense.clinical.train  --config configs/clinical_config.yaml
+# Full pipeline: EDA -> split -> LogReg -> XGBoost -> select -> calibrate -> SHAP
+# CPU only, ~2 minutes.
+python -m cardiosense.clinical.train
 
-# ECG       — GPU, ~25 minutes for 40 epochs at 100 Hz
-python -m cardiosense.ecg.train       --config configs/ecg_config.yaml
+# Faster iteration while developing
+python -m cardiosense.clinical.train --skip-eda --set models.xgboost.n_iter_search=10
 
-# X-ray     — GPU, ~45 minutes for 15 epochs on the filtered subset
-python -m cardiosense.xray.train      --config configs/xray_config.yaml
+# Ablations, without editing any YAML
+python -m cardiosense.clinical.train --set seed=7
+python -m cardiosense.clinical.train --set selection.threshold_tuning_data=validation
+python -m cardiosense.clinical.train --set models.logistic_regression.enabled=false
 ```
 
-Any config value can be overridden without editing YAML:
+Inference:
 
 ```bash
-python -m cardiosense.ecg.train --config configs/ecg_config.yaml \
-    --set training.epochs=2 --set model.name=resnet1d
+python -m cardiosense.clinical.predict --example
+python -m cardiosense.clinical.predict --json '{"age": 63, "sex": 1, "cp": 4, "ca": 2, "thal": 7}'
+python -m cardiosense.clinical.predict --csv patients.csv --output predictions.csv
 ```
+
+Or run `notebooks/01_clinical_training.ipynb`, which does the same thing with
+figures displayed inline.
+
+### ECG (implemented)
+
+```bash
+# Full pipeline. GPU. First run builds the ~1 GB waveform cache (several minutes),
+# later runs memory-map it instantly.
+python -m cardiosense.ecg.train
+
+# Quick smoke test
+python -m cardiosense.ecg.train --set training.epochs=2 --skip-baseline --skip-explain
+
+# Experiment E-C: does extra depth earn its cost?
+python -m cardiosense.ecg.train --set model.name=resnet1d --experiment-name ecg_resnet
+```
+
+If Colab drops mid-run, re-run the same command — it resumes from the next epoch.
+
+Inference:
+
+```bash
+python -m cardiosense.ecg.predict --record data/ecg/ptbxl/records100/00000/00001_lr
+python -m cardiosense.ecg.predict --npy waveform.npy --output prediction.json
+```
+
+Or run `notebooks/02_ecg_training.ipynb`.
+
+### X-ray (implemented)
+
+```bash
+# Full pipeline. GPU.
+python -m cardiosense.xray.train
+
+# Quick smoke test on a capped subset
+python -m cardiosense.xray.train --set dataset.max_images=2000 --set training.epochs=2
+
+# Ablation: train on every negative instead of the 8:1 subsample
+python -m cardiosense.xray.train --set dataset.negative_ratio=null
+```
+
+Re-run the same command after a Colab disconnect — it resumes, including the
+staged-unfreeze state.
+
+Inference:
+
+```bash
+python -m cardiosense.xray.predict --image data/xray/nih/images/00000013_005.png
+python -m cardiosense.xray.predict --image <path> --gradcam out/cam.png
+python -m cardiosense.xray.predict --dir some/folder --output predictions.csv
+```
+
+Or run `notebooks/03_xray_training.ipynb`.
+
+Any config value can be overridden from the command line with
+`--set dotted.key=value`; values are type-coerced automatically.
 
 ---
 
@@ -284,6 +368,90 @@ Every headline number is reported with a bootstrap 95% confidence interval.
 ---
 
 ## 10. Explainability
+
+### Clinical pipeline — four decisions worth defending in the viva
+
+**1. Preprocessing is fit on train only.** The imputer's medians, the encoder's
+category levels and the scaler's means are *learned parameters*. Fitting them on
+the full dataset before splitting lets test patients shape the training
+representation, which inflates every metric invisibly. `tests/test_clinical.py`
+asserts that the fitted scaler mean differs from the full-data mean — if it ever
+matches, the leak test itself has stopped working.
+
+**2. The threshold is tuned on ~250 points, not 45.** Youden's index computed on
+a 45-patient validation split is itself a high-variance estimate. During
+development, validation-only tuning picked a 0.65 cut that collapsed test recall
+to 0.09; pooling out-of-fold training predictions with validation moved the cut to
+0.40 and recall to 0.73 **on identical data**. Both options remain in the config
+(`selection.threshold_tuning_data`) so the ablation can be reported.
+
+**3. The calibration method is chosen without circularity.** The final calibrator
+is fitted on validation, so the *choice* between Platt and isotonic cannot also be
+made there — isotonic would win by fitting it exactly. Instead, out-of-fold
+predictions on train give ~200 honest (probability, outcome) pairs, and each
+candidate mapping is fitted and scored on **disjoint** subsets of those. An earlier
+version of this code got that wrong, picked isotonic, and made the test Brier score
+*worse* while emitting calibrated probabilities of exactly 1.0. The current version
+picks sigmoid and improves it.
+
+**4. Model selection is not by accuracy, and near-ties go to the simpler model.**
+ROC-AUC ranks the candidates; if they land within `tie_tolerance`, Logistic
+Regression wins over XGBoost. At this sample size a 0.01 AUC gap is inside the
+sampling noise, and the linear model is easier to audit and calibrates more
+reliably.
+
+### ECG pipeline — four decisions worth defending in the viva
+
+**1. Multi-label, not multi-class.** A PTB-XL record can carry both `MI` and
+`STTC`. Forcing one label per record would delete true positives and corrupt every
+metric. This drives the loss (`BCEWithLogitsLoss`), the thresholds (one per class),
+and the metric set — `multilabel_metrics` deliberately **refuses to emit
+`accuracy`** and reports exact-match ratio under that explicit name instead.
+
+**2. Splits use PTB-XL's official `strat_fold`.** Folds 1–8 / 9 / 10 are
+patient-disjoint by the dataset authors' construction, so leakage is impossible
+rather than merely avoided — and the numbers stay comparable to published work.
+`split_by_fold` asserts zero patient overlap and writes the counts to
+`results/ecg/split_summary.json`.
+
+**3. Every preprocessing step is justified individually.** A 0.5 Hz zero-phase
+high-pass is applied (drift is not diagnostic and wrecks normalisation); a
+low-pass and a mains notch are **not** (they would blunt QRS upstrokes and sit
+beyond Nyquist respectively). Per-lead z-scoring is computed within each record,
+so it is leakage-free by construction — at the documented cost of discarding
+absolute voltage, which matters for `HYP`.
+
+**4. Integrated Gradients is called Integrated Gradients.** Neither architecture
+contains attention, so calling the saliency map "attention" would misdescribe the
+model. The completeness property (attributions must sum to `F(x) − F(baseline)`)
+is checked numerically, and `n_steps` is raised automatically when the check
+fails rather than returning a map known not to sum correctly.
+
+### X-ray pipeline — four decisions worth defending in the viva
+
+**1. The split is by patient, and the code asserts it.** A patient contributes
+several films; an image-level split puts the same chest on both sides and inflates
+AUC by several points while looking entirely normal in the metrics.
+`split_by_patient` raises rather than returning a quietly corrupted split, and
+negative subsampling drops **whole patients** so it cannot reintroduce the leak.
+
+**2. Horizontal flip is refused, not merely disabled.** It is the default in
+almost every ImageNet recipe and it is wrong here: mirroring a chest X-ray moves
+the heart to the right side of the thorax, which is dextrocardia. Enabling it in
+config raises a `ValueError` naming the reason.
+
+**3. PR-AUC is the headline; accuracy is contextualised.** At the real ~2.5%
+prevalence, always-negative scores ~97.5% accuracy and finds nothing. The
+majority-class baseline puts exactly that row in the comparison table, and
+`evaluate_binary` records `pr_auc_chance_level` (= prevalence) and
+`accuracy_of_always_negative` in every metrics block.
+
+**4. One imbalance correction, not several.** `pos_weight` inside
+`BCEWithLogitsLoss`. `WeightedRandomSampler` is implemented but disabled: stacking
+both applies the correction twice and produces wildly over-confident
+probabilities, which would poison the confidence-aware fusion planned for Phase 2.
+
+### Explainability methods
 
 | Pipeline | Method | Why this one |
 |---|---|---|
@@ -364,12 +532,45 @@ CardioSense/
 │   │   ├── training.py           checkpoint resume, early stopping, history
 │   │   ├── experiment.py         JSON + CSV experiment tracker
 │   │   └── compat.py             sklearn 1.6 & torch 2.4 API shims
-│   ├── clinical/                 preprocessing, train, evaluate, calibrate, explain, predict
-│   ├── ecg/                      preprocessing, dataset, models, train, evaluate, explain, predict
-│   └── xray/                     preprocessing, dataset, models, train, evaluate, explain, predict
+│   ├── clinical/                 IMPLEMENTED
+│   │   ├── data.py               loading, target definition, sentinel cleaning
+│   │   ├── eda.py                statistically appropriate EDA (see note below)
+│   │   ├── preprocessing.py      stratified split + leakage-free ColumnTransformer
+│   │   ├── models.py             LogReg + XGBoost construction and tuning
+│   │   ├── evaluate.py           metrics, selection, threshold, error analysis
+│   │   ├── calibrate.py          Platt vs isotonic, chosen without leaking
+│   │   ├── explain.py            SHAP global + per-patient
+│   │   ├── train.py              orchestrator (`python -m cardiosense.clinical.train`)
+│   │   └── predict.py            inference (`ClinicalPredictor`)
+│   ├── ecg/                      IMPLEMENTED
+│   │   ├── data.py               PTB-XL metadata, SCP -> superclass labels, fold splits
+│   │   ├── preprocessing.py      filtering, normalisation, waveform cache
+│   │   ├── dataset.py            PyTorch Dataset + Colab-tuned DataLoaders
+│   │   ├── models.py             1D CNN and ResNet-1D
+│   │   ├── baseline.py           statistical features + one-vs-rest LogReg
+│   │   ├── trainer.py            resumable training loop, AMP, early stopping
+│   │   ├── evaluate.py           multi-label metrics, thresholds, recommendation
+│   │   ├── explain.py            Integrated Gradients with completeness check
+│   │   ├── train.py              orchestrator (`python -m cardiosense.ecg.train`)
+│   │   └── predict.py            inference (`ECGPredictor`)
+│   └── xray/                     IMPLEMENTED
+│       ├── data.py               NIH metadata, target extraction, patient-level split
+│       ├── preprocessing.py      transforms; augmentation guards (no horizontal flip)
+│       ├── dataset.py            PNG-reading Dataset + DataLoaders
+│       ├── models.py             DenseNet121 + staged unfreezing
+│       ├── baseline.py           majority-class + pixel-feature LogReg
+│       ├── trainer.py            two-stage fine-tuning, resumable
+│       ├── evaluate.py           PR-AUC-led metrics, thresholds, recommendation
+│       ├── explain.py            Grad-CAM via hooks
+│       ├── train.py              orchestrator (`python -m cardiosense.xray.train`)
+│       └── predict.py            inference (`XrayPredictor`)
 │
 ├── scripts/verify_setup.py       one-command environment + dataset check
-├── tests/test_common.py          fast CPU-only smoke tests
+├── tests/
+│   ├── test_common.py            19 fast CPU-only tests
+│   ├── test_clinical.py          27 tests incl. explicit leakage checks
+│   ├── test_ecg.py               31 tests incl. patient-disjointness and IG completeness
+│   └── test_xray.py              32 tests incl. augmentation guards and Grad-CAM hooks
 │
 ├── models/                       artifacts (binaries git-ignored)
 ├── results/                      metrics, figures, experiment log (committed)
