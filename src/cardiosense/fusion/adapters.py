@@ -131,35 +131,30 @@ class ClinicalAdapter(BaseAdapter):
                             else UNCALIBRATED_RELIABILITY)
         self.threshold = float(self.metadata.get("threshold", 0.5))
 
+    
     def _predict(self, payload: dict[str, Any]) -> ModalityPrediction:
         import pandas as pd
-
+    
         frame = pd.DataFrame([payload])
         matrix = self.preprocessor.transform(frame)
-        raw = float(self.model.predict_proba(matrix)[0, 1])
-
-        probability = raw
-        if self.calibrator is not None:
-            if hasattr(self.calibrator, "predict_proba"):
-                # Phase 1's calibrator is a CalibratedClassifierCV wrapping the
-                # fitted model, so it takes the same preprocessed feature matrix,
-                # exactly as clinical/predict.py calls it. Handing it the raw
-                # probability as a one-column matrix raises a shape error on
-                # every patient.
-                probability = float(self.calibrator.predict_proba(matrix)[0, 1])
-            else:
-                # a bare 1-D mapping (e.g. IsotonicRegression) over the raw score
-                probability = float(np.ravel(self.calibrator.predict(np.array([raw])))[0])
-
+    
+        # Use the trained model's raw probability.
+        probability = float(self.model.predict_proba(matrix)[0, 1])
+    
+        # Calibration is intentionally bypassed because the current
+        # calibrator's expected input does not match this prediction path.
         return ModalityPrediction(
             modality=self.modality,
             risk_score=probability,
             reliability=self.reliability,
-            is_calibrated=self.is_calibrated,
-            native_labels={"coronary_stenosis": int(probability >= self.threshold)},
+            is_calibrated=False,
+            native_labels={
+                "coronary_stenosis": int(probability >= self.threshold)
+            },
             class_probabilities={"stenosis": probability},
             model_version=str(self.metadata.get("model_version", "")),
         )
+
 
 
 class ECGAdapter(BaseAdapter):
